@@ -1,11 +1,11 @@
-name: Notify Home Repo of New Release
+name: Notify and Update Ecosystem on New Release
 
 on:
   release:
     types: [published]
 
 jobs:
-  notify:
+  notify-and-update:
     runs-on: ubuntu-latest
     steps:
       - name: Trigger Update in Home Repo
@@ -15,3 +15,53 @@ jobs:
           repository: teamajayji/home
           event-type: new_release
           client-payload: '{"version": "${{ github.event.release.tag_name }}", "url": "${{ github.event.release.html_url }}"}'
+
+      - name: Checkout Homebrew Tap
+        uses: actions/checkout@v4
+        with:
+          repository: teamajayji/homebrew-tap
+          token: ${{ secrets.HOME_REPO_PAT }}
+          path: homebrew-tap
+
+      - name: Update Homebrew Cask
+        run: |
+          VERSION="${{ github.event.release.tag_name }}"
+          # Remove 'v' prefix for brew versioning if present
+          CLEAN_VERSION=${VERSION#v}
+          
+          # GitHub API URL to fetch release assets
+          ASSETS_URL="${{ github.event.release.assets_url }}"
+          
+          # Find the DMG asset download URL
+          DMG_URL=$(curl -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" -s $ASSETS_URL | jq -r '.[] | select(.name | endswith(".dmg")) | .browser_download_url')
+          
+          if [ -z "$DMG_URL" ] || [ "$DMG_URL" = "null" ]; then
+            echo "Error: No DMG asset found in this release. Skipping Homebrew update."
+            exit 0
+          fi
+          
+          echo "Found DMG URL: $DMG_URL"
+          
+          # Download the DMG to calculate SHA256
+          echo "Downloading DMG to calculate hash..."
+          curl -L -o app.dmg "$DMG_URL"
+          
+          SHA256=$(shasum -a 256 app.dmg | awk '{print $1}')
+          echo "SHA256: $SHA256"
+          
+          # Update the cask file
+          CASK_FILE="homebrew-tap/Casks/ajayji.rb"
+          
+          # Use sed to replace version, sha256, and url
+          sed -i "s/version \".*\"/version \"$CLEAN_VERSION\"/" $CASK_FILE
+          sed -i "s/sha256 \".*\"/sha256 \"$SHA256\"/" $CASK_FILE
+          # We need to use | as delimiter for URL replacement since URL contains slashes
+          sed -i "s|url \".*\"|url \"$DMG_URL\"|" $CASK_FILE
+          
+          # Commit and push
+          cd homebrew-tap
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          git add Casks/ajayji.rb
+          git commit -m "Update Ajayji Cask to ${VERSION}" || echo "No changes to commit"
+          git push
